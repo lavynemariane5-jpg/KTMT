@@ -1,0 +1,6 @@
+{
+  "name": "Kit Matemática Infantil",
+  "description": "Landing page premium e moderna para o Kit Matemática Infantil de 4 e 5 anos, otimizada para conversão.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

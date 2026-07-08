@@ -1,0 +1,901 @@
+/**
+ * @license
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { useState, useEffect, FormEvent } from 'react';
+import { motion, AnimatePresence } from 'motion/react';
+import { X, ShieldCheck, Mail, CheckCircle, Copy, AlertCircle, FileText, Smartphone, CreditCard } from 'lucide-react';
+
+interface CheckoutModalProps {
+  isOpen: boolean;
+  onClose: () => void;
+  selectedKit: {
+    id: string;
+    name: string;
+    price: number;
+  } | null;
+  initialStep?: 1 | 2 | 3 | 4;
+  initialPaymentResult?: any;
+  initialName?: string;
+  initialEmail?: string;
+}
+
+export default function CheckoutModal({ 
+  isOpen, 
+  onClose, 
+  selectedKit,
+  initialStep = 1,
+  initialPaymentResult = null,
+  initialName = '',
+  initialEmail = ''
+}: CheckoutModalProps) {
+  const [step, setStep] = useState<1 | 2 | 3 | 4>(initialStep);
+  const [name, setName] = useState(initialName);
+  const [email, setEmail] = useState(initialEmail);
+  const [phone, setPhone] = useState('');
+  const [publicKey, setPublicKey] = useState('');
+  const [simulate, setSimulate] = useState(true);
+  const [hasCustomToken, setHasCustomToken] = useState(false);
+  const [paymentResult, setPaymentResult] = useState<any>(null);
+  const [copiedPix, setCopiedPix] = useState(false);
+  const [errorMessage, setErrorMessage] = useState('');
+  const [brickLoading, setBrickLoading] = useState(false);
+  const [isPolling, setIsPolling] = useState(false);
+
+  // Custom simulation states
+  const [simulatedTab, setSimulatedTab] = useState<'pix' | 'card'>('pix');
+  const [simCardNumber, setSimCardNumber] = useState('');
+  const [simCardName, setSimCardName] = useState('');
+  const [simCardExpiry, setSimCardExpiry] = useState('');
+  const [simCardCVV, setSimCardCVV] = useState('');
+  const [simCardFocused, setSimCardFocused] = useState<'front' | 'back'>('front');
+  const [isSubmittingSimulated, setIsSubmittingSimulated] = useState(false);
+
+  // Helper formatting functions for simulated card inputs
+  const formatCardNumber = (value: string) => {
+    const digits = value.replace(/\D/g, '').slice(0, 16);
+    return digits.replace(/(\d{4})(?=\d)/g, '$1 ');
+  };
+
+  const formatExpiry = (value: string) => {
+    const digits = value.replace(/\D/g, '').slice(0, 4);
+    if (digits.length > 2) {
+      return `${digits.slice(0, 2)}/${digits.slice(2)}`;
+    }
+    return digits;
+  };
+
+  const formatCVV = (value: string) => {
+    return value.replace(/\D/g, '').slice(0, 4);
+  };
+
+  const handleSimulatedPaymentSubmit = async (paymentMethod: 'pix' | 'card') => {
+    setIsSubmittingSimulated(true);
+    setErrorMessage('');
+    
+    try {
+      const response = await fetch("/api/process_payment", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          formData: {
+            payment_method_id: paymentMethod === 'pix' ? 'pix' : 'master',
+            transaction_amount: selectedKit.price,
+          },
+          kitId: selectedKit.id,
+          name,
+          email,
+          phone,
+          simulate: true,
+        }),
+      });
+
+      let result: any;
+      try {
+        result = await response.json();
+      } catch (e) {
+        throw new Error("Resposta inválida do servidor de pagamento.");
+      }
+
+      if (!result.success) {
+        throw new Error(result.error || "Erro ao processar o pagamento simulado.");
+      }
+
+      setPaymentResult(result);
+
+      if (paymentMethod === 'pix') {
+        setStep(4); // Advance to Pix display screen
+      } else {
+        setStep(3); // Advance to Approved / Success screen
+      }
+    } catch (err: any) {
+      console.error("Simulated payment failed:", err);
+      setErrorMessage(err.message || "Erro de simulação de pagamento.");
+    } finally {
+      setIsSubmittingSimulated(false);
+    }
+  };
+
+  // Load config on mount/open
+  useEffect(() => {
+    if (isOpen) {
+      setStep(initialStep);
+      setName(initialName);
+      setEmail(initialEmail);
+      setPaymentResult(initialPaymentResult);
+      setErrorMessage('');
+      fetch('/api/config')
+        .then((res) => res.json())
+        .then((data) => {
+          setPublicKey(data.publicKey);
+          setHasCustomToken(data.hasCustomToken);
+          // If user set up a custom token in secrets, default simulate to false
+          if (data.hasCustomToken) {
+            setSimulate(false);
+          }
+        })
+        .catch((err) => {
+          console.error("Erro ao carregar configurações do Mercado Pago:", err);
+        });
+    }
+  }, [isOpen, initialStep, initialPaymentResult, initialName, initialEmail]);
+
+  // Render payment brick on step 2
+  useEffect(() => {
+    if (step !== 2 || !publicKey || !isOpen || !selectedKit) return;
+
+    if (simulate) {
+      setBrickLoading(false);
+      setErrorMessage('');
+      return;
+    }
+
+    let isCurrent = true;
+    let brickController: any = null;
+    setBrickLoading(true);
+    setErrorMessage('');
+
+    const initBrick = async () => {
+      try {
+        if (!(window as any).MercadoPago) {
+          throw new Error("SDK do Mercado Pago não foi carregado. Verifique sua conexão com a internet.");
+        }
+
+        const mp = new (window as any).MercadoPago(publicKey, { locale: 'pt-BR' });
+        const bricksBuilder = mp.bricks();
+
+        const settings = {
+          initialization: {
+            amount: selectedKit.price,
+            payer: {
+              email: email || "cliente@exemplo.com",
+            },
+          },
+          customization: {
+            paymentMethods: {
+              bankTransfer: ["pix"],
+              creditCard: "all",
+              debitCard: "all",
+            },
+            visual: {
+              style: {
+                theme: "default", // default theme looks extremely clean
+              }
+            }
+          },
+          callbacks: {
+            onReady: () => {
+              if (isCurrent) {
+                setBrickLoading(false);
+              }
+            },
+            onSubmit: (param: any) => {
+              return new Promise<void>(async (resolve, reject) => {
+                try {
+                  const formData = param?.formData || param;
+                  const response = await fetch("/api/process_payment", {
+                    method: "POST",
+                    headers: {
+                      "Content-Type": "application/json",
+                    },
+                    body: JSON.stringify({
+                      formData,
+                      kitId: selectedKit.id,
+                      name,
+                      email,
+                      phone,
+                      simulate,
+                    }),
+                  });
+
+                  let result: any;
+                  try {
+                    result = await response.json();
+                  } catch (e) {
+                    throw new Error("Resposta inválida do servidor de pagamento.");
+                  }
+
+                  // Stop Mercado Pago's infinite loading state immediately
+                  resolve();
+
+                  if (!result.success) {
+                    throw new Error(result.error || "Erro ao processar o pagamento.");
+                  }
+
+                  if (isCurrent) {
+                    setPaymentResult(result);
+                    // Slight delay before unmounting / transitioning to avoid Mercado Pago iframe race conditions
+                    setTimeout(() => {
+                      if (isCurrent) {
+                        if (result.status === "approved") {
+                          setStep(3); // Success page
+                        } else if (result.status === "pending" && result.qr_code) {
+                          setStep(4); // Show Pix QR Code page
+                        } else {
+                          // fallback or other status (e.g. in_process)
+                          setStep(3);
+                        }
+                      }
+                    }, 50);
+                  }
+                } catch (err: any) {
+                  console.error("Payment submission error:", err);
+                  if (isCurrent) {
+                    setErrorMessage(err.message || "Erro ao processar o pagamento. Tente novamente.");
+                    setBrickLoading(false);
+                  }
+                  resolve(); // Safely stop MP spinner animation
+                }
+              });
+            },
+            onError: (error: any) => {
+              console.error("Mercado Pago Brick error callback:", error);
+              if (isCurrent) {
+                setErrorMessage("Erro interno do formulário Mercado Pago. Certifique-se de preencher os dados corretamente ou use o Modo Simulado.");
+                setBrickLoading(false);
+              }
+            },
+          },
+        };
+
+        const container = document.getElementById("paymentBrick_container");
+        if (container) {
+          container.innerHTML = "";
+        }
+
+        const controller = await bricksBuilder.create(
+          "payment",
+          "paymentBrick_container",
+          settings
+        );
+
+        if (!isCurrent) {
+          if (controller && typeof controller.unmount === 'function') {
+            controller.unmount();
+          }
+        } else {
+          brickController = controller;
+        }
+      } catch (err: any) {
+        console.error("Failed to initialize payment brick:", err);
+        if (isCurrent) {
+          setErrorMessage(err.message || "Erro de inicialização do Mercado Pago.");
+          setBrickLoading(false);
+        }
+      }
+      return;
+    };
+
+    const timer = setTimeout(() => {
+      initBrick();
+    }, 150);
+
+    return () => {
+      isCurrent = false;
+      clearTimeout(timer);
+      if (brickController && typeof brickController.unmount === 'function') {
+        brickController.unmount();
+      }
+    };
+  }, [step, publicKey, isOpen, email, name, phone, selectedKit, simulate]);
+
+  // Pix payment status polling (step 4)
+  useEffect(() => {
+    if (step !== 4 || !paymentResult?.id) return;
+
+    setIsPolling(true);
+
+    const interval = setInterval(() => {
+      fetch(`/api/payment_status/${paymentResult.id}`)
+        .then((res) => res.json())
+        .then((data) => {
+          if (data.status === "approved") {
+            clearInterval(interval);
+            setIsPolling(false);
+            // Slight delay for premium feel
+            setTimeout(() => {
+              setStep(3);
+            }, 1000);
+          }
+        })
+        .catch((err) => {
+          console.error("Status check failed:", err);
+        });
+    }, 3000);
+
+    return () => {
+      clearInterval(interval);
+      setIsPolling(false);
+    };
+  }, [step, paymentResult]);
+
+  if (!isOpen || !selectedKit) return null;
+
+  const handleUserInfoSubmit = (e: FormEvent) => {
+    e.preventDefault();
+    if (name && email && phone) {
+      setStep(2);
+    }
+  };
+
+  const copyPixKey = () => {
+    if (paymentResult?.qr_code) {
+      navigator.clipboard.writeText(paymentResult.qr_code);
+      setCopiedPix(true);
+      setTimeout(() => setCopiedPix(false), 2000);
+    }
+  };
+
+  return (
+    <AnimatePresence>
+      <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 overflow-y-auto">
+        {/* Backdrop overlay */}
+        <motion.div
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          onClick={onClose}
+          className="fixed inset-0 bg-black/60 backdrop-blur-sm"
+        />
+
+        {/* Modal content body */}
+        <motion.div
+          initial={{ opacity: 0, scale: 0.95, y: 20 }}
+          animate={{ opacity: 1, scale: 1, y: 0 }}
+          exit={{ opacity: 0, scale: 0.95, y: 20 }}
+          className="relative bg-white w-full max-w-lg rounded-[32px] shadow-2xl overflow-hidden border border-gray-100 z-10 my-8"
+        >
+          {/* Header */}
+          <div className="bg-brand-blue text-white px-6 py-5 flex items-center justify-between">
+            <div className="flex items-center gap-2.5">
+              <div className="w-8 h-8 rounded-lg bg-white/20 flex items-center justify-center font-black">
+                $
+              </div>
+              <div>
+                <h3 className="font-extrabold text-base leading-none">Checkout Seguro</h3>
+                <span className="text-[10px] text-blue-100 font-bold uppercase tracking-widest">
+                  Mercado Pago Bricks
+                </span>
+              </div>
+            </div>
+            <button
+              onClick={onClose}
+              className="p-1.5 rounded-full hover:bg-white/10 text-white/80 hover:text-white transition-colors cursor-pointer"
+            >
+              <X className="w-5 h-5" />
+            </button>
+          </div>
+
+          <div className="p-6">
+            {/* Step indicators */}
+            {step !== 3 && (
+              <div className="flex items-center gap-2 mb-5">
+                <div className={`flex-1 h-1.5 rounded-full ${step >= 1 ? 'bg-brand-blue' : 'bg-gray-100'}`} />
+                <div className={`flex-1 h-1.5 rounded-full ${step >= 2 ? 'bg-brand-blue' : 'bg-gray-100'}`} />
+                <div className={`flex-1 h-1.5 rounded-full ${step === 4 ? 'bg-brand-blue animate-pulse' : 'bg-gray-100'}`} />
+              </div>
+            )}
+
+            {/* Current product selection info */}
+            {step !== 3 && (
+              <div className="bg-brand-gray border border-gray-100 rounded-2xl p-4 mb-5 flex justify-between items-center">
+                <div>
+                  <span className="text-[10px] font-black text-brand-blue uppercase tracking-widest block mb-0.5">
+                    Você escolheu o:
+                  </span>
+                  <span className="text-sm font-black text-gray-800">{selectedKit.name}</span>
+                </div>
+                <div className="text-right">
+                  <span className="text-xs text-gray-400 line-through font-bold block">
+                    R$ {selectedKit.id === 'kit-basico' ? '29,90' : '59,90'}
+                  </span>
+                  <span className="text-lg font-black text-brand-green">
+                    R$ {selectedKit.price.toFixed(2).replace('.', ',')}
+                  </span>
+                </div>
+              </div>
+            )}
+
+            {/* Step 1: User details */}
+            {step === 1 && (
+              <form onSubmit={handleUserInfoSubmit} className="space-y-4">
+                <div>
+                  <label className="block text-xs font-bold text-gray-500 uppercase mb-1.5 tracking-wider">
+                    Seu Nome Completo
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={name}
+                    onChange={(e) => setName(e.target.value)}
+                    placeholder="Ex: Ana Maria Silva"
+                    className="w-full bg-brand-gray border border-gray-200 focus:border-brand-blue focus:ring-2 focus:ring-brand-blue/20 rounded-xl px-4 py-3 text-sm font-semibold text-gray-800 outline-none transition-all"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-gray-500 uppercase mb-1.5 tracking-wider">
+                    Seu Melhor E-mail (Para receber os PDFs)
+                  </label>
+                  <div className="relative">
+                    <Mail className="absolute left-4 top-3.5 w-4 h-4 text-gray-400" />
+                    <input
+                      type="email"
+                      required
+                      value={email}
+                      onChange={(e) => setEmail(e.target.value)}
+                      placeholder="Ex: mae@email.com"
+                      className="w-full bg-brand-gray border border-gray-200 focus:border-brand-blue focus:ring-2 focus:ring-brand-blue/20 rounded-xl pl-11 pr-4 py-3 text-sm font-semibold text-gray-800 outline-none transition-all"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-gray-500 uppercase mb-1.5 tracking-wider">
+                    WhatsApp / Telefone
+                  </label>
+                  <div className="relative">
+                    <Smartphone className="absolute left-4 top-3.5 w-4 h-4 text-gray-400" />
+                    <input
+                      type="tel"
+                      required
+                      value={phone}
+                      onChange={(e) => setPhone(e.target.value)}
+                      placeholder="Ex: (11) 99999-9999"
+                      className="w-full bg-brand-gray border border-gray-200 focus:border-brand-blue focus:ring-2 focus:ring-brand-blue/20 rounded-xl pl-11 pr-4 py-3 text-sm font-semibold text-gray-800 outline-none transition-all"
+                    />
+                  </div>
+                </div>
+
+                {/* Simulated Mode Toggle for testing (hidden if user has custom production credentials) */}
+                {!hasCustomToken && (
+                  <div className="p-3.5 bg-blue-50/50 rounded-2xl border border-blue-100 flex items-start gap-3 mt-4">
+                    <input
+                      type="checkbox"
+                      id="simulate-check"
+                      checked={simulate}
+                      onChange={(e) => setSimulate(e.target.checked)}
+                      className="w-4 h-4 text-brand-blue border-gray-300 rounded-sm focus:ring-brand-blue mt-0.5 cursor-pointer"
+                    />
+                    <div className="text-xs">
+                      <label htmlFor="simulate-check" className="font-extrabold text-gray-700 cursor-pointer block">
+                        Modo Simulado de Testes (Recomendado)
+                      </label>
+                      <p className="text-gray-500 mt-0.5 font-medium leading-normal">
+                        Ative para testar sem precisar usar cartões ou CPFs reais. O Pix será aprovado automaticamente em 12 segundos!
+                      </p>
+                    </div>
+                  </div>
+                )}
+
+                <button
+                  type="submit"
+                  className="w-full bg-brand-green hover:bg-[#439c46] text-white font-extrabold py-4 rounded-xl transition-all duration-300 shadow-md shadow-brand-green/20 hover:scale-[1.01] active:scale-[0.99] mt-6 cursor-pointer"
+                >
+                  IR PARA O PAGAMENTO
+                </button>
+              </form>
+            )}
+
+            {/* Step 2: Payment options */}
+            {step === 2 && (
+              <div className="space-y-4">
+                {errorMessage && (
+                  <div className="bg-red-50 border border-red-100 rounded-2xl p-4 flex flex-col gap-3 text-red-800 text-xs font-semibold leading-relaxed">
+                    <div className="flex gap-3">
+                      <AlertCircle className="w-5 h-5 shrink-0 text-red-500 mt-0.5" />
+                      <div>
+                        <p className="font-bold">Falha no processamento</p>
+                        <p className="mt-0.5 text-red-600">{errorMessage}</p>
+                      </div>
+                    </div>
+                    {!simulate && (
+                      <div className="pt-2 border-t border-red-100 flex justify-end">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setSimulate(true);
+                            setErrorMessage('');
+                          }}
+                          className="bg-brand-blue hover:bg-blue-700 text-white font-extrabold px-3 py-1.5 rounded-lg text-[10px] uppercase tracking-wider cursor-pointer"
+                        >
+                          Usar Modo Simulado (Seguro)
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {simulate ? (
+                  /* Simulated checkout form */
+                  <div className="space-y-4">
+                    {/* Tabs */}
+                    <div className="grid grid-cols-2 gap-2 bg-brand-gray p-1 rounded-2xl border border-gray-100">
+                      <button
+                        type="button"
+                        onClick={() => setSimulatedTab('pix')}
+                        className={`flex items-center justify-center gap-2 py-3 rounded-xl text-xs font-black transition-all cursor-pointer ${
+                          simulatedTab === 'pix'
+                            ? 'bg-white text-brand-blue shadow-xs'
+                            : 'text-gray-500 hover:text-gray-800'
+                        }`}
+                      >
+                        <Smartphone className="w-4 h-4" />
+                        PIX SIMULADO
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setSimulatedTab('card')}
+                        className={`flex items-center justify-center gap-2 py-3 rounded-xl text-xs font-black transition-all cursor-pointer ${
+                          simulatedTab === 'card'
+                            ? 'bg-white text-brand-blue shadow-xs'
+                            : 'text-gray-500 hover:text-gray-800'
+                        }`}
+                      >
+                        <CreditCard className="w-4 h-4" />
+                        CARTÃO SIMULADO
+                      </button>
+                    </div>
+
+                    {simulatedTab === 'pix' ? (
+                      /* Simulated Pix tab */
+                      <div className="space-y-5 text-center py-4 bg-blue-50/20 rounded-3xl border border-blue-50 p-5">
+                        <div className="w-12 h-12 rounded-full bg-blue-50 flex items-center justify-center mx-auto text-brand-blue">
+                          <Smartphone className="w-6 h-6 animate-bounce" />
+                        </div>
+                        <div className="space-y-1.5">
+                          <h4 className="text-sm font-extrabold text-gray-800">Simulação de Pagamento por Pix</h4>
+                          <p className="text-xs text-gray-500 max-w-xs mx-auto font-medium leading-normal">
+                            Ao clicar no botão abaixo, geraremos um Pix de teste. O sistema simulará o recebimento e aprovará sua compra automaticamente em 12 segundos!
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          disabled={isSubmittingSimulated}
+                          onClick={() => handleSimulatedPaymentSubmit('pix')}
+                          className="w-full bg-brand-green hover:bg-[#439c46] disabled:bg-gray-300 text-white font-extrabold py-3.5 rounded-xl transition-all duration-300 shadow-sm flex items-center justify-center gap-2 cursor-pointer"
+                        >
+                          {isSubmittingSimulated ? (
+                            <>
+                              <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                              <span>Processando...</span>
+                            </>
+                          ) : (
+                            <span>GERAR PIX SIMULADO DE R$ {selectedKit.price.toFixed(2).replace('.', ',')}</span>
+                          )}
+                        </button>
+                      </div>
+                    ) : (
+                      /* Simulated Credit Card tab */
+                      <div className="space-y-4">
+                        {/* Beautiful Credit Card Mockup */}
+                        <div className="w-full max-w-[320px] h-[180px] mx-auto bg-gradient-to-br from-brand-blue to-blue-700 text-white rounded-2xl p-5 flex flex-col justify-between shadow-lg relative overflow-hidden transition-all duration-300">
+                          <div className="absolute -right-10 -top-10 w-32 h-32 bg-teal-400/20 rounded-full blur-2xl pointer-events-none" />
+                          
+                          {simCardFocused === 'back' ? (
+                            <div className="flex flex-col justify-between h-full w-full">
+                              <div className="h-8 bg-slate-950 -mx-5 mt-1" />
+                              <div className="flex flex-col gap-1">
+                                <span className="text-[9px] text-right font-bold text-blue-200">CÓDIGO DE SEGURANÇA (CVV)</span>
+                                <div className="bg-white/10 h-9 rounded-xl px-3 flex items-center justify-end font-mono text-sm tracking-widest font-black text-right select-none">
+                                  {simCardCVV || '•••'}
+                                </div>
+                              </div>
+                              <div className="text-[9px] text-blue-200 font-black tracking-widest text-center uppercase">
+                                MODO SIMULADO ATIVO
+                              </div>
+                            </div>
+                          ) : (
+                            <div className="flex flex-col justify-between h-full w-full">
+                              <div className="flex justify-between items-start">
+                                <span className="text-[10px] font-black tracking-widest uppercase text-blue-100">CARTÃO DE TESTE</span>
+                                <div className="w-10 h-7 bg-white/20 rounded-lg flex items-center justify-center">
+                                  <div className="w-6 h-5 bg-yellow-400/80 rounded-sm" />
+                                </div>
+                              </div>
+                              <div>
+                                <div className="text-lg font-mono tracking-widest mb-2 font-bold text-center">
+                                  {simCardNumber || '•••• •••• •••• ••••'}
+                                </div>
+                                <div className="flex justify-between items-end">
+                                  <div className="max-w-[70%]">
+                                    <div className="text-[8px] uppercase font-bold text-blue-200 tracking-wider">Titular</div>
+                                    <div className="text-xs font-black truncate uppercase text-white">{simCardName || 'NOME DO TITULAR'}</div>
+                                  </div>
+                                  <div>
+                                    <div className="text-[8px] uppercase font-bold text-blue-200 tracking-wider">Validade</div>
+                                    <div className="text-xs font-mono font-black text-white">{simCardExpiry || 'MM/AA'}</div>
+                                  </div>
+                                </div>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Card Form */}
+                        <form
+                          onSubmit={(e) => {
+                            e.preventDefault();
+                            if (simCardNumber && simCardName && simCardExpiry && simCardCVV) {
+                              handleSimulatedPaymentSubmit('card');
+                            }
+                          }}
+                          className="space-y-3"
+                        >
+                          <div>
+                            <label className="block text-[10px] font-bold text-gray-400 uppercase mb-1 tracking-wider">Número do Cartão</label>
+                            <input
+                              type="text"
+                              required
+                              value={simCardNumber}
+                              onFocus={() => setSimCardFocused('front')}
+                              onChange={(e) => setSimCardNumber(formatCardNumber(e.target.value))}
+                              placeholder="4444 4444 4444 4444"
+                              className="w-full bg-brand-gray border border-gray-200 focus:border-brand-blue focus:ring-2 focus:ring-brand-blue/20 rounded-xl px-4 py-2.5 text-xs font-semibold text-gray-800 outline-none transition-all"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[10px] font-bold text-gray-400 uppercase mb-1 tracking-wider">Nome no Cartão</label>
+                            <input
+                              type="text"
+                              required
+                              value={simCardName}
+                              onFocus={() => setSimCardFocused('front')}
+                              onChange={(e) => setSimCardName(e.target.value)}
+                              placeholder="Ex: NOME DO TITULAR"
+                              className="w-full bg-brand-gray border border-gray-200 focus:border-brand-blue focus:ring-2 focus:ring-brand-blue/20 rounded-xl px-4 py-2.5 text-xs font-semibold text-gray-800 outline-none transition-all uppercase"
+                            />
+                          </div>
+                          <div className="grid grid-cols-2 gap-3">
+                            <div>
+                              <label className="block text-[10px] font-bold text-gray-400 uppercase mb-1 tracking-wider">Validade</label>
+                              <input
+                                type="text"
+                                required
+                                value={simCardExpiry}
+                                onFocus={() => setSimCardFocused('front')}
+                                onChange={(e) => setSimCardExpiry(formatExpiry(e.target.value))}
+                                placeholder="MM/AA"
+                                className="w-full bg-brand-gray border border-gray-200 focus:border-brand-blue focus:ring-2 focus:ring-brand-blue/20 rounded-xl px-4 py-2.5 text-xs font-semibold text-gray-800 outline-none transition-all"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-[10px] font-bold text-gray-400 uppercase mb-1 tracking-wider">CVV</label>
+                              <input
+                                type="text"
+                                required
+                                value={simCardCVV}
+                                onFocus={() => setSimCardFocused('back')}
+                                onBlur={() => setSimCardFocused('front')}
+                                onChange={(e) => setSimCardCVV(formatCVV(e.target.value))}
+                                placeholder="123"
+                                className="w-full bg-brand-gray border border-gray-200 focus:border-brand-blue focus:ring-2 focus:ring-brand-blue/20 rounded-xl px-4 py-2.5 text-xs font-semibold text-gray-800 outline-none transition-all"
+                              />
+                            </div>
+                          </div>
+
+                          <button
+                            type="submit"
+                            disabled={isSubmittingSimulated}
+                            className="w-full bg-brand-green hover:bg-[#439c46] disabled:bg-gray-300 text-white font-extrabold py-3.5 rounded-xl transition-all duration-300 shadow-sm flex items-center justify-center gap-2 cursor-pointer mt-4"
+                          >
+                            {isSubmittingSimulated ? (
+                              <>
+                                <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                                <span>Processando...</span>
+                              </>
+                            ) : (
+                              <span>PAGAR R$ {selectedKit.price.toFixed(2).replace('.', ',')}</span>
+                            )}
+                          </button>
+                        </form>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  /* Real Mercado Pago Brick */
+                  <div className="relative min-h-[350px]">
+                    {brickLoading && (
+                      <div className="absolute inset-0 bg-white z-10 flex flex-col items-center justify-center gap-3 py-16">
+                        <div className="w-8 h-8 border-4 border-brand-blue border-t-transparent rounded-full animate-spin" />
+                        <span className="text-xs text-gray-500 font-extrabold uppercase tracking-wider">
+                          Preparando Checkout Mercado Pago...
+                        </span>
+                      </div>
+                    )}
+
+                    <div
+                      id="paymentBrick_container"
+                      className="block min-h-[350px]"
+                    />
+                  </div>
+                )}
+
+                <div className="pt-4 border-t border-gray-100 flex items-center justify-between">
+                  <button
+                    onClick={() => setStep(1)}
+                    className="text-gray-400 hover:text-gray-600 text-xs font-black uppercase tracking-wider cursor-pointer"
+                  >
+                    Voltar
+                  </button>
+                  <span className="text-[10px] text-gray-400 font-bold uppercase tracking-widest flex items-center gap-1">
+                    <ShieldCheck className="w-3.5 h-3.5 text-brand-green" />
+                    Criptografia SSL Segura
+                  </span>
+                </div>
+              </div>
+            )}
+
+            {/* Step 4: Pix Display (QR Code and Copia e Cola) */}
+            {step === 4 && (
+              <div className="space-y-5 text-center">
+                <div className="max-w-[180px] mx-auto bg-white p-3 border border-gray-200 rounded-3xl shadow-sm flex items-center justify-center">
+                  {paymentResult?.qr_code_base64 ? (
+                    <img
+                      src={`data:image/png;base64,${paymentResult.qr_code_base64}`}
+                      alt="Pix QR Code"
+                      referrerPolicy="no-referrer"
+                      className="w-full h-auto rounded-xl"
+                    />
+                  ) : (
+                    <div className="w-36 h-36 bg-gray-100 animate-pulse rounded-xl" />
+                  )}
+                </div>
+
+                <div className="space-y-1.5">
+                  <h4 className="text-base font-extrabold text-gray-900">Código de Pagamento Pix</h4>
+                  <p className="text-xs text-gray-500 max-w-sm mx-auto px-4 font-semibold leading-normal">
+                    Abra o aplicativo de pagamentos do seu banco, escolha a opção "Pix Copia e Cola" ou escaneie o código QR acima.
+                  </p>
+                </div>
+
+                <div className="px-4">
+                  <button
+                    onClick={copyPixKey}
+                    className="w-full flex items-center justify-center gap-2 bg-brand-gray border border-gray-200 hover:border-gray-300 text-gray-800 text-xs font-black py-3.5 rounded-xl transition-all cursor-pointer shadow-xs active:scale-[0.99]"
+                  >
+                    <Copy className="w-4 h-4 text-brand-blue" />
+                    <span>{copiedPix ? 'CÓDIGO COPIADO!' : 'COPIAR CHAVE PIX COPIA E COLA'}</span>
+                  </button>
+                </div>
+
+                <div className="bg-amber-50/70 border border-amber-100 rounded-2xl p-4 mx-4 flex items-center justify-center gap-3 text-amber-800 text-xs font-bold">
+                  <div className="w-4 h-4 border-2 border-amber-600 border-t-transparent rounded-full animate-spin" />
+                  <span>Aguardando confirmação do seu banco...</span>
+                </div>
+
+                {simulate && (
+                  <p className="text-[10px] text-brand-blue font-extrabold uppercase tracking-wider">
+                    💡 Modo de teste: o pagamento será aprovado em 12 segundos de forma automática!
+                  </p>
+                )}
+
+                <div className="pt-2 border-t border-gray-100 flex justify-start">
+                  <button
+                    onClick={() => setStep(2)}
+                    className="text-gray-400 hover:text-gray-600 text-xs font-black uppercase tracking-wider cursor-pointer"
+                  >
+                    Voltar para opções
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Step 3: Success state (Product Delivery) */}
+            {step === 3 && (
+              <motion.div
+                initial={{ opacity: 0, scale: 0.95 }}
+                animate={{ opacity: 1, scale: 1 }}
+                className="text-center py-4 space-y-6"
+              >
+                <div className="w-16 h-16 rounded-full bg-emerald-50 text-brand-green mx-auto flex items-center justify-center shadow-lg shadow-brand-green/10">
+                  <CheckCircle className="w-10 h-10" />
+                </div>
+
+                <div className="space-y-1">
+                  <h3 className="text-xl font-black text-gray-900">Acesso Liberado com Sucesso!</h3>
+                  <p className="text-xs text-gray-500 font-semibold max-w-sm mx-auto leading-normal">
+                    Seu pagamento foi confirmado pelo Mercado Pago. O material completo em PDF de alta qualidade está disponível para download imediato abaixo.
+                  </p>
+                </div>
+
+                {/* Recipient box */}
+                <div className="bg-emerald-50 text-brand-green/90 p-4 rounded-2xl text-left border border-emerald-100/60 font-semibold space-y-2 text-xs">
+                  <div className="flex items-center gap-1.5 font-bold text-brand-green border-b border-emerald-100/60 pb-1.5">
+                    <Mail className="w-4 h-4" />
+                    <span>Seu Comprovante de Acesso:</span>
+                  </div>
+                  <div><strong>Destinatário:</strong> {name || "Cliente Premium"}</div>
+                  <div><strong>E-mail de Cadastro:</strong> {email || "cliente@email.com"}</div>
+                  <div><strong>Produto Adquirido:</strong> {selectedKit.name} (Acesso Vitalício)</div>
+                  <div><strong>ID da Transação:</strong> {paymentResult?.id || "MP-7389271"}</div>
+                </div>
+
+                {/* Delivering Real Worksheets to make it super interactive and cool! */}
+                <div className="space-y-3 pt-2">
+                  <span className="block text-[10px] font-black text-gray-400 uppercase tracking-widest">
+                    Clique abaixo para baixar seu produto digital:
+                  </span>
+                  
+                  <div className="grid grid-cols-1 gap-2.5">
+                    <a
+                      href={selectedKit?.id === "kit-completo" ? "/kit_matematica_completo_100_exercicios.pdf" : "/kit_matematica_basico_50_exercicios.pdf"}
+                      download={selectedKit?.id === "kit-completo" ? "kit_matematica_completo_100_exercicios.pdf" : "kit_matematica_basico_50_exercicios.pdf"}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="inline-flex items-center justify-center gap-2 bg-brand-green hover:bg-[#439c46] text-white font-extrabold w-full py-4 rounded-xl shadow-md transition-all hover:-translate-y-0.5 active:translate-y-0"
+                    >
+                      <FileText className="w-5 h-5 text-white" />
+                      <span>BAIXAR KIT MATEMÁTICA PDF ({selectedKit?.id === "kit-basico" ? "50" : "100"} Exercícios)</span>
+                    </a>
+
+                    {selectedKit?.id === "kit-completo" && (
+                      <a
+                        href="/certificado_bonus.pdf"
+                        download="certificado_bonus.pdf"
+                        target="_blank"
+                        rel="noreferrer"
+                        className="inline-flex items-center justify-center gap-2 bg-brand-blue hover:bg-brand-blue/95 text-white font-extrabold w-full py-4 rounded-xl shadow-md transition-all hover:-translate-y-0.5 active:translate-y-0"
+                      >
+                        <FileText className="w-5 h-5 text-brand-yellow" />
+                        <span>BAIXAR CERTIFICADO & BÔNUS EXCLUSIVOS</span>
+                      </a>
+                    )}
+                  </div>
+                </div>
+
+                <div className="bg-gray-50 p-3.5 rounded-2xl border border-gray-100 text-left">
+                  <p className="text-[10px] text-gray-400 font-extrabold uppercase tracking-widest block mb-1">
+                    Instruções de Impressão:
+                  </p>
+                  <p className="text-[11px] text-gray-500 font-medium leading-relaxed">
+                    Você também recebeu um e-mail com o link de download permanente. Salve os arquivos PDF no computador e imprima os exercícios e atividades em tamanho A4 de acordo com o progresso do seu pequeno!
+                  </p>
+                </div>
+
+                <button
+                  onClick={onClose}
+                  className="text-xs text-gray-400 hover:text-gray-600 font-black uppercase tracking-wider cursor-pointer transition-colors"
+                >
+                  Fechar janela
+                </button>
+              </motion.div>
+            )}
+          </div>
+
+          {/* Secure footer badge */}
+          {step !== 3 && (
+            <div className="bg-brand-gray border-t border-gray-100 px-6 py-4 flex items-center justify-center gap-2 text-[10px] font-bold text-gray-400 uppercase tracking-widest">
+              <ShieldCheck className="w-4 h-4 text-brand-green shrink-0" />
+              <span>Conexão Segura e Criptografada SSL</span>
+            </div>
+          )}
+        </motion.div>
+      </div>
+    </AnimatePresence>
+  );
+}
+
